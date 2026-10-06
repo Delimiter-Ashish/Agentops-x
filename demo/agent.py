@@ -22,7 +22,15 @@ PROMPTS = {
 }
 
 
-def make_llm():
+def make_llm(profile=None):
+    """profile: None -> settings from .env (LLM_*), "local" -> the self-hosted vLLM server (LOCAL_*)."""
+    if profile == "local":
+        from langchain_openai import ChatOpenAI
+        # Streaming lets the tracer measure time-to-first-token and decode speed.
+        return ChatOpenAI(base_url=f"http://127.0.0.1:{os.environ.get('VLLM_PORT', '8001')}/v1",
+                          api_key=os.environ.get("VLLM_API_KEY", "local"),
+                          model=os.environ.get("LOCAL_MODEL", "Qwen/Qwen2.5-14B-Instruct"),
+                          temperature=0.2, timeout=120, max_retries=2, streaming=True, stream_usage=True)
     if os.environ.get("DEMO_FAKE_LLM") == "1":
         from demo.fake_llm import FakeFinanceLLM
         return FakeFinanceLLM()

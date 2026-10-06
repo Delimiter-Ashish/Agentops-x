@@ -10,3 +10,4 @@ langgraph==1.2.14
 langchain-core==1.6.7
 langchain-openai==1.6.7
 langchain-google-genai==4.4.0
+nvidia-ml-py==13.615.71

@@ -63,3 +63,24 @@ Event = Annotated[RunStart | SpanIn | RunEnd, Field(discriminator="type")]
 
 class IngestBatch(BaseModel):
     events: list[Event] = Field(max_length=5000)
+
+
+class GpuSampleIn(BaseModel):
+    ts: dt.datetime
+    host: str | None = None
+    gpu_index: int | None = None
+    gpu_name: str | None = None
+    util_pct: float | None = None
+    mem_used_mb: float | None = None
+    mem_total_mb: float | None = None
+    power_w: float | None = None
+    temp_c: float | None = None
+    kv_cache_pct: float | None = None
+    requests_running: float | None = None
+    requests_waiting: float | None = None
+    gen_tokens_per_s: float | None = None
+    prompt_tokens_per_s: float | None = None
+
+
+class GpuBatch(BaseModel):
+    samples: list[GpuSampleIn] = Field(max_length=5000)

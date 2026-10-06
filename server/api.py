@@ -1,4 +1,5 @@
 """Query API used by the dashboard and CLI."""
+import datetime as dt
 import math
 import uuid
 
@@ -6,11 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, literal_column, select
 
 from server.db import get_session
-from server.models import PromptVersion, Run, Span
+from server.models import GpuSample, PromptVersion, Run, Span
 
 router = APIRouter(prefix="/api")
 
-RUN_FIELDS = ("id", "agent_name", "status", "task_success", "failure_reason", "error_type", "started_at",
+RUN_FIELDS = ("id", "agent_name", "model", "status", "task_success", "failure_reason", "error_type", "started_at",
               "ended_at", "latency_ms", "llm_calls", "tool_calls", "tool_errors", "retries", "prompt_tokens",
               "completion_tokens", "cost_usd", "peak_memory_mb", "max_state_bytes", "tags")
 SPAN_FIELDS = ("id", "parent_id", "kind", "name", "status", "attempt", "started_at", "ended_at", "latency_ms",
@@ -25,6 +26,30 @@ def run_dict(r, detail=False):
         d.update(input=r.input, output=r.output, metadata=r.meta,
                  prompt_template=r.prompt_version.template if r.prompt_version else None)
     return d
+
+
+def tokens_per_s(span):
+    """Decode speed: output tokens / time spent generating (after the first token, when streamed)."""
+    toks, lat = span.get("completion_tokens"), span.get("latency_ms")
+    if not toks or not lat:
+        return None
+    gen_ms = lat - (span.get("ttft_ms") or 0)
+    return toks / (gen_ms / 1000) if gen_ms > 0 else None
+
+
+def gpu_context(span, samples):
+    """GPU / inference-server state while this LLM call was running."""
+    if not span.get("ended_at"):
+        return None
+    pad = dt.timedelta(seconds=1)
+    win = [g for g in samples if span["started_at"] - pad <= g.ts <= span["ended_at"] + pad]
+    if not win:
+        return None
+    avg = lambda xs: sum(xs) / len(xs) if xs else None  # noqa: E731
+    vals = lambda f: [getattr(g, f) for g in win if getattr(g, f) is not None]  # noqa: E731
+    return {"samples": len(win), "util_pct": avg(vals("util_pct")), "kv_cache_pct": avg(vals("kv_cache_pct")),
+            "requests_running": avg(vals("requests_running")), "requests_waiting": avg(vals("requests_waiting")),
+            "mem_used_mb": max(vals("mem_used_mb"), default=None), "power_w": avg(vals("power_w"))}
 
 
 def wilson(successes, n, z=1.96):
@@ -76,13 +101,22 @@ async def get_run(run_id: uuid.UUID, session=Depends(get_session)):
     run = (await session.execute(select(Run).where(Run.id == run_id))).scalar_one_or_none()
     if run is None:
         raise HTTPException(404, "run not found")
-    spans = (await session.execute(
-        select(Span).where(Span.run_id == run_id).order_by(Span.started_at))).scalars().all()
-    return {"run": run_dict(run, detail=True), "spans": [{f: getattr(s, f) for f in SPAN_FIELDS} for s in spans]}
+    spans = [{f: getattr(s, f) for f in SPAN_FIELDS} for s in (await session.execute(
+        select(Span).where(Span.run_id == run_id).order_by(Span.started_at))).scalars().all()]
+    samples = []
+    if spans and run.ended_at:
+        pad = dt.timedelta(seconds=2)
+        samples = (await session.execute(select(GpuSample).where(
+            GpuSample.ts >= run.started_at - pad, GpuSample.ts <= run.ended_at + pad))).scalars().all()
+    for sp in spans:
+        if sp["kind"] == "llm":
+            sp["tokens_per_s"] = tokens_per_s(sp)
+            sp["gpu"] = gpu_context(sp, samples) if samples else None
+    return {"run": run_dict(run, detail=True), "spans": spans}
 
 
 @router.get("/prompt-versions")
-async def prompt_versions(agent: str, session=Depends(get_session)):
+async def prompt_versions(agent: str, model: str | None = None, session=Depends(get_session)):
     """Side-by-side reliability, latency and cost per prompt version, with confidence intervals."""
     done = Run.status != "running"
     rows = (await session.execute(select(
@@ -97,7 +131,7 @@ async def prompt_versions(agent: str, session=Depends(get_session)):
         func.avg(Run.retries).filter(done),
         func.avg(Run.tool_errors).filter(done),
     ).join(Run, Run.prompt_version_id == PromptVersion.id)
-        .where(PromptVersion.agent_name == agent)
+        .where(PromptVersion.agent_name == agent, *([Run.model == model] if model else []))
         .group_by(PromptVersion.id).order_by(PromptVersion.created_at))).all()
     out = []
     for name, pv_id, created, n, ok, err, p50, p95, cost, tokens, retries, tool_err in rows:
@@ -143,3 +177,38 @@ async def timeseries(agent: str, bucket: str = Query("minute", pattern="^(minute
         Run.agent_name == agent, Run.status != "running").group_by(t).order_by(t))).all()
     return [{"t": ts, "runs": n, "success_rate": sr, "p95_latency_ms": p95, "cost_usd": c}
             for ts, n, sr, p95, c in rows]
+
+
+@router.get("/models")
+async def models(agent: str, session=Depends(get_session)):
+    """Head-to-head comparison of the LLMs an agent ran on (e.g. a hosted API vs a self-hosted model)."""
+    done = Run.status != "running"
+    rows = (await session.execute(select(
+        Run.model, func.count(Run.id), func.count(Run.id).filter(Run.status == "success"),
+        func.percentile_cont(0.5).within_group(Run.latency_ms),
+        func.percentile_cont(0.95).within_group(Run.latency_ms),
+        func.avg(Run.cost_usd), func.avg(Run.prompt_tokens + Run.completion_tokens), func.avg(Run.retries),
+    ).where(Run.agent_name == agent, done, Run.model.is_not(None)).group_by(Run.model))).all()
+    speed = {m: (ttft, ctoks, gen_ms) for m, ttft, ctoks, gen_ms in (await session.execute(select(
+        Span.model, func.percentile_cont(0.5).within_group(Span.ttft_ms),
+        func.sum(Span.completion_tokens), func.sum(Span.latency_ms - func.coalesce(Span.ttft_ms, 0.0)),
+    ).join(Run, Run.id == Span.run_id).where(Run.agent_name == agent, Span.kind == "llm",
+                                             Span.status == "ok").group_by(Span.model))).all()}
+    out = []
+    for m, n, ok, p50, p95, cost, toks, retries in rows:
+        lo, hi = wilson(ok, n)
+        ttft, ctoks, gen_ms = speed.get(m, (None, None, None))
+        out.append({"model": m, "runs": n, "success_rate": ok / n if n else None, "success_ci95": [lo, hi],
+                    "p50_latency_ms": p50, "p95_latency_ms": p95, "avg_cost_usd": cost, "avg_tokens": toks,
+                    "avg_retries": retries, "p50_ttft_ms": ttft,
+                    "tokens_per_s": (ctoks / (gen_ms / 1000)) if ctoks and gen_ms else None})
+    return out
+
+
+@router.get("/gpu/timeseries")
+async def gpu_timeseries(minutes: int = Query(30, le=24 * 60), session=Depends(get_session)):
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutes)
+    rows = (await session.execute(select(GpuSample).where(GpuSample.ts >= since).order_by(GpuSample.ts))).scalars().all()
+    fields = ("ts", "gpu_index", "gpu_name", "util_pct", "mem_used_mb", "mem_total_mb", "power_w", "temp_c",
+              "kv_cache_pct", "requests_running", "requests_waiting", "gen_tokens_per_s", "prompt_tokens_per_s")
+    return [{f: getattr(r, f) for f in fields} for r in rows]

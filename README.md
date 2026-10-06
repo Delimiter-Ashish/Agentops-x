@@ -4,7 +4,7 @@
 
 An agent can look great in a demo and still fail quietly across real executions. When it does, was it a tool call, a prompt change, a retry storm, latency, cost, or the agent's state? AgentOps-X makes every execution traceable so you can answer that with data.
 
-> Status: **Phase 1, core platform.** SDK, collector, PostgreSQL data model, query API, and a demo agent with fault injection.
+> Status: **Phase 2, GPU-aware tracing.** Hosted APIs and self-hosted LLMs (vLLM) traced side by side, down to the GPU.
 
 ## What it captures
 For every run of a LangGraph agent, with one line of instrumentation:
@@ -34,11 +34,34 @@ The SDK never breaks or blocks the agent: events go through a bounded queue to a
 
 ```
   LangGraph agent ──callbacks──► SDK (batching exporter) ──HTTP──► FastAPI collector ──► PostgreSQL
-                                                                         │
-                                         query API: runs · traces · prompt versions · failures · timeseries
+        │                                                                 ▲    │
+        └──► LLM: hosted API or self-hosted vLLM ◄── GPU telemetry agent ─┘    │
+                                                  (NVML + vLLM /metrics)       │
+                          query API: runs · traces · prompt versions · models · failures · GPU timeseries
 ```
 
 **Data model:** `prompt_versions 1─* runs 1─* spans` (spans form a tree via `parent_id`). Prompt versions are content-addressed (SHA-256 of the template), so editing a prompt automatically creates a new version. Every ingest is an idempotent upsert on client-generated UUIDs, so retried batches never duplicate data. Run aggregates (tokens, cost, retries, tool errors, peak memory) are computed server-side from spans in the same transaction as `run_end`.
+
+## GPU-aware tracing for self-hosted LLMs
+Most agent observability stops at the API boundary. When the model runs on your own GPU, AgentOps-X goes further:
+
+| Signal | Source |
+|---|---|
+| **Time to first token, decode tokens/s** per LLM call | streamed responses, measured in the SDK |
+| **GPU utilization, memory, power, temperature** | NVML, sampled at 1 Hz by `agentops.gpu` |
+| **KV-cache usage, running / queued requests, server token throughput** | vLLM Prometheus `/metrics` |
+| **GPU context of each call** | samples aligned to the call's time window: was it slow because the GPU was saturated or the queue was full? |
+| **Batching-aware GPU cost** | `latency x GPU $/s / average concurrent requests`, so a call served alongside 4 others is charged a fifth of the GPU |
+
+`GET /api/models?agent=...` compares the models an agent ran on head to head: success rate with confidence intervals, p50/p95 latency, TTFT, tokens/s, and cost per run. That answers "is the self-hosted model good enough, and what does it really cost?" with data.
+
+```bash
+bash scripts/setup_gpu.sh                     # separate venv for the vLLM server
+bash scripts/llm.sh                           # serve the model (OpenAI-compatible, tool calling)
+python -m agentops.gpu                        # GPU + vLLM telemetry agent
+python -m demo.run --llm local --runs 30      # same agent, self-hosted model
+python -m demo.run models                     # hosted vs self-hosted, head to head
+```
 
 ## Prompt version comparison with statistics
 `GET /api/prompt-versions?agent=fin-agent` returns success rate with a **95% Wilson confidence interval**, p50/p95 latency, cost per run, retries, and tool errors for each version, plus a **two-proportion z-test p-value** against the best version. So "v2 is better" is a measured claim, not a vibe.
@@ -58,7 +81,7 @@ DEMO_FAKE_LLM=1 python -m demo.run --runs 100   # offline, no API key needed
 
 ## Roadmap
 - [x] Phase 1: SDK, collector, data model, statistics API, demo agent with fault injection
-- [ ] Phase 2: self-hosted LLM on GPU (vLLM) with GPU-aware tracing: TTFT, tokens/s, KV-cache, GPU memory
+- [x] Phase 2: self-hosted LLM on GPU (vLLM), GPU-aware tracing, batching-aware GPU cost, model head-to-head
 - [ ] Phase 3: dashboard: runs, trace waterfall, graph view, prompt comparison, cost and latency charts
 - [ ] Phase 4: AI root-cause analyst (failure clustering), chaos testing, run replay
 - [ ] Phase 5: Docker Compose, migrations, tests, demo GIF

@@ -44,10 +44,12 @@ def main():
     ap.add_argument("--prompts", nargs="+", default=list(PROMPTS))
     ap.add_argument("--concurrency", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--llm", choices=["env", "local"], default="env",
+                    help="env: LLM_* settings from .env (e.g. Gemini); local: self-hosted vLLM server")
     args = ap.parse_args()
 
     agentops.init()
-    llm = make_llm()
+    llm = make_llm(None if args.llm == "env" else args.llm)
     graphs = {v: build_graph(llm, PROMPTS[v]) for v in args.prompts}
     tasks = make_tasks(args.runs, seed=args.seed)
     jobs = [(args.prompts[i % len(args.prompts)], t) for i, t in enumerate(tasks)]
@@ -61,8 +63,9 @@ def main():
 
     agentops.flush()
     endpoint = os.environ.get("AGENTOPS_ENDPOINT", "http://127.0.0.1:8000")
-    rows = httpx.get(f"{endpoint}/api/prompt-versions", params={"agent": AGENT_NAME}).json()
-    print("\nprompt version comparison (all runs so far)")
+    rows = (httpx.get(f"{endpoint}/api/prompt-versions", params={"agent": AGENT_NAME, "model": model}).json()
+            or httpx.get(f"{endpoint}/api/prompt-versions", params={"agent": AGENT_NAME}).json())
+    print(f"\nprompt version comparison for {model} (all runs so far)")
     print(f"{'version':<8}{'runs':>6}{'success':>10}{'95% CI':>16}{'p50 s':>8}{'p95 s':>8}{'retries':>9}"
           f"{'tool err':>10}{'$/run':>10}{'p vs best':>11}")
     for r in rows:
@@ -76,4 +79,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if sys.argv[1:2] == ["models"]:   # python -m demo.run models  -> model head-to-head table
+        print_models()
+    else:
+        main()
+
+
+def print_models():
+    endpoint = os.environ.get("AGENTOPS_ENDPOINT", "http://127.0.0.1:8000")
+    rows = httpx.get(f"{endpoint}/api/models", params={"agent": AGENT_NAME}).json()
+    print(f"{'model':<34}{'runs':>6}{'success':>9}{'p50 s':>8}{'p95 s':>8}{'TTFT ms':>9}{'tok/s':>8}{'$/run':>10}")
+    for r in rows:
+        f = lambda v, fmt: format(v, fmt) if v is not None else "-"  # noqa: E731
+        print(f"{r['model'][:33]:<34}{r['runs']:>6}{f(r['success_rate'], '.0%'):>9}"
+              f"{f((r['p50_latency_ms'] or 0) / 1000, '.1f'):>8}{f((r['p95_latency_ms'] or 0) / 1000, '.1f'):>8}"
+              f"{f(r['p50_ttft_ms'], '.0f'):>9}{f(r['tokens_per_s'], '.0f'):>8}{f(r['avg_cost_usd'], '.5f'):>10}")

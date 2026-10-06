@@ -41,6 +41,7 @@ class Run(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     agent_name: Mapped[str] = mapped_column(String(200))
+    model: Mapped[str | None] = mapped_column(String(200), index=True)  # main LLM used by the run
     prompt_version_id: Mapped[int | None] = mapped_column(ForeignKey("prompt_versions.id"))
     status: Mapped[str] = mapped_column(String(16), default="running", index=True)  # running|success|failure|error
     task_success: Mapped[bool | None] = mapped_column(Boolean)
@@ -95,3 +96,25 @@ class Span(Base):
     output: Mapped[dict | list | str | None] = mapped_column(JSONType)
     error: Mapped[dict | None] = mapped_column(JSONType)
     attributes: Mapped[dict | None] = mapped_column(JSONType)
+
+
+class GpuSample(Base):
+    """1 Hz telemetry from the GPU (NVML) and the inference server (vLLM Prometheus metrics)."""
+    __tablename__ = "gpu_samples"
+    __table_args__ = (Index("ix_gpu_samples_ts", "ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ts: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    host: Mapped[str | None] = mapped_column(String(200))
+    gpu_index: Mapped[int | None] = mapped_column(Integer)
+    gpu_name: Mapped[str | None] = mapped_column(String(200))
+    util_pct: Mapped[float | None] = mapped_column(Float)
+    mem_used_mb: Mapped[float | None] = mapped_column(Float)
+    mem_total_mb: Mapped[float | None] = mapped_column(Float)
+    power_w: Mapped[float | None] = mapped_column(Float)
+    temp_c: Mapped[float | None] = mapped_column(Float)
+    kv_cache_pct: Mapped[float | None] = mapped_column(Float)
+    requests_running: Mapped[float | None] = mapped_column(Float)
+    requests_waiting: Mapped[float | None] = mapped_column(Float)
+    gen_tokens_per_s: Mapped[float | None] = mapped_column(Float)
+    prompt_tokens_per_s: Mapped[float | None] = mapped_column(Float)

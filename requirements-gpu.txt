@@ -1,0 +1,3 @@
+# Self-hosted inference server, installed in its own virtualenv (Aopx-llm) by scripts/setup_gpu.sh.
+# vLLM pins its own torch/CUDA stack, so it is kept apart from the platform's dependencies.
+vllm
