@@ -3,9 +3,11 @@
     uvicorn server.main:app --host 127.0.0.1 --port 8000
 """
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from server import api
@@ -55,3 +57,9 @@ async def ingest_gpu_samples(batch: GpuBatch, session=Depends(get_session)):
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+# Dashboard (built React app). Mounted last so it never shadows the API routes.
+DASHBOARD = Path(__file__).resolve().parent.parent / "dashboard" / "dist"
+if DASHBOARD.is_dir():
+    app.mount("/", StaticFiles(directory=DASHBOARD, html=True), name="dashboard")

@@ -85,6 +85,7 @@ async def agents(session=Depends(get_session)):
 
 @router.get("/runs")
 async def list_runs(agent: str | None = None, status: str | None = None, prompt_version: str | None = None,
+                    model: str | None = None,
                     limit: int = Query(50, le=500), offset: int = 0, session=Depends(get_session)):
     q = select(Run).order_by(Run.started_at.desc()).limit(limit).offset(offset)
     if agent:
@@ -93,6 +94,8 @@ async def list_runs(agent: str | None = None, status: str | None = None, prompt_
         q = q.where(Run.status == status)
     if prompt_version:
         q = q.join(PromptVersion).where(PromptVersion.name == prompt_version)
+    if model:
+        q = q.where(Run.model == model)
     return [run_dict(r) for r in (await session.execute(q)).scalars().all()]
 
 
@@ -139,7 +142,8 @@ async def prompt_versions(agent: str, model: str | None = None, session=Depends(
         out.append({"prompt_version": name, "id": pv_id, "created_at": created, "runs": n, "successes": ok,
                     "errors": err, "success_rate": ok / n if n else None, "success_ci95": [lo, hi],
                     "p50_latency_ms": p50, "p95_latency_ms": p95, "avg_cost_usd": cost,
-                    "avg_tokens": tokens, "avg_retries": retries, "avg_tool_errors": tool_err})
+                    "avg_tokens": tokens, "avg_retries": retries, "avg_tool_errors": tool_err,
+                    "cost_per_success_usd": (cost * n / ok) if cost is not None and ok else None})
     if len(out) >= 2:
         best = max(out, key=lambda r: r["success_rate"] or 0)
         for r in out:
@@ -200,8 +204,14 @@ async def models(agent: str, session=Depends(get_session)):
         ttft, ctoks, gen_ms = speed.get(m, (None, None, None))
         out.append({"model": m, "runs": n, "success_rate": ok / n if n else None, "success_ci95": [lo, hi],
                     "p50_latency_ms": p50, "p95_latency_ms": p95, "avg_cost_usd": cost, "avg_tokens": toks,
-                    "avg_retries": retries, "p50_ttft_ms": ttft,
+                    "avg_retries": retries, "p50_ttft_ms": ttft, "successes": ok,
+                    "cost_per_success_usd": (cost * n / ok) if cost is not None and ok else None,
                     "tokens_per_s": (ctoks / (gen_ms / 1000)) if ctoks and gen_ms else None})
+    if len(out) >= 2:
+        best = max(out, key=lambda r: r["success_rate"] or 0)
+        for r in out:
+            r["p_value_vs_best"] = None if r is best else two_proportion_p(
+                r["successes"], r["runs"], best["successes"], best["runs"])
     return out
 
 
@@ -212,3 +222,23 @@ async def gpu_timeseries(minutes: int = Query(30, le=24 * 60), session=Depends(g
     fields = ("ts", "gpu_index", "gpu_name", "util_pct", "mem_used_mb", "mem_total_mb", "power_w", "temp_c",
               "kv_cache_pct", "requests_running", "requests_waiting", "gen_tokens_per_s", "prompt_tokens_per_s")
     return [{f: getattr(r, f) for f in fields} for r in rows]
+
+
+@router.get("/summary")
+async def summary(agent: str, hours: int = Query(24 * 30, le=24 * 365), session=Depends(get_session)):
+    """Headline numbers for the overview page."""
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+    done = Run.status != "running"
+    n, ok, err, p50, p95, cost, total_cost, retries, tool_err, tokens = (await session.execute(select(
+        func.count(Run.id).filter(done), func.count(Run.id).filter(Run.status == "success"),
+        func.count(Run.id).filter(Run.status == "error"),
+        func.percentile_cont(0.5).within_group(Run.latency_ms).filter(done),
+        func.percentile_cont(0.95).within_group(Run.latency_ms).filter(done),
+        func.avg(Run.cost_usd).filter(done), func.sum(Run.cost_usd), func.sum(Run.retries),
+        func.sum(Run.tool_errors), func.sum(Run.prompt_tokens + Run.completion_tokens),
+    ).where(Run.agent_name == agent, Run.started_at >= since))).one()
+    lo, hi = wilson(ok, n)
+    return {"runs": n, "successes": ok, "errors": err, "success_rate": ok / n if n else None,
+            "success_ci95": [lo, hi], "p50_latency_ms": p50, "p95_latency_ms": p95, "avg_cost_usd": cost,
+            "total_cost_usd": total_cost, "cost_per_success_usd": (total_cost / ok) if total_cost and ok else None,
+            "retries": retries, "tool_errors": tool_err, "tokens": tokens}

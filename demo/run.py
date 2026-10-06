@@ -78,12 +78,6 @@ def main():
               f"{'best' if pv is None else f'{pv:.3f}':>11}")
 
 
-if __name__ == "__main__":
-    import sys
-    if sys.argv[1:2] == ["models"]:   # python -m demo.run models  -> model head-to-head table
-        print_models()
-    else:
-        main()
 
 
 def print_models():
@@ -95,3 +89,11 @@ def print_models():
         print(f"{r['model'][:33]:<34}{r['runs']:>6}{f(r['success_rate'], '.0%'):>9}"
               f"{f((r['p50_latency_ms'] or 0) / 1000, '.1f'):>8}{f((r['p95_latency_ms'] or 0) / 1000, '.1f'):>8}"
               f"{f(r['p50_ttft_ms'], '.0f'):>9}{f(r['tokens_per_s'], '.0f'):>8}{f(r['avg_cost_usd'], '.5f'):>10}")
+
+
+if __name__ == "__main__":
+    import sys
+    if sys.argv[1:2] == ["models"]:   # python -m demo.run models  -> model head-to-head table
+        print_models()
+    else:
+        main()

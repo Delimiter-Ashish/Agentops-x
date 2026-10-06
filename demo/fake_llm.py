@@ -3,6 +3,7 @@
 It follows the tool-use protocol like a real model (lookup -> price -> fx -> calculator -> answer)
 and makes realistic mistakes: occasionally a wrong company name or a final answer computed by hand.
 """
+import os
 import random
 import re
 import uuid
@@ -13,7 +14,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 
 class FakeFinanceLLM(BaseChatModel):
-    model_name: str = "fake-finance-llm"
+    model_name: str = os.environ.get("DEMO_FAKE_MODEL", "fake-finance-llm")
 
     @property
     def _llm_type(self):
