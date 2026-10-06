@@ -35,30 +35,34 @@ with agentops.run("fin-agent", input=question, prompt_version=("v2", PROMPT)) as
 
 ## What it found
 
-I ran the same LangGraph finance agent (ticker lookup, prices, FX, calculator, with injected timeouts and latency spikes) 30 times on a hosted model and 30 times on an open model served on an NVIDIA A100. Every answer was checked against a known correct value.
+I ran the same LangGraph finance agent (ticker lookup, prices, FX, calculator, with injected timeouts and latency spikes) on a hosted model and on an open model served on an NVIDIA A100, with up to 8 agents running at once. Every answer was checked against a known correct value.
 
 | | Gemini 3 Flash (hosted API) | Qwen2.5-14B-Instruct (self-hosted, A100) |
 |---|---|---|
-| Task success | **93%** (95% CI 79–98%) | 60% (95% CI 42–75%) |
-| Median latency | 9.7 s | **6.9 s** |
-| p95 latency | **14.3 s** | 21.7 s |
+| Runs | 30 | 82 |
+| Task success | **93%** (95% CI 79–98%) | 59% (95% CI 48–69%) |
+| Median latency | 9.7 s | **7.7 s** |
+| p95 latency | **14.3 s** | 23.5 s |
 | Time to first token | n/a | **60 ms** |
-| Cost per run | $0.00198 | **$0.00149** |
-| **Cost per successful run** | **$0.00212** | $0.00248 |
+| Cost per run | **$0.00198** | $0.00280 |
+| Cost per successful run | **$0.00212** | $0.00478 |
 
-Three things the traces made visible:
+What the traces made visible:
 
-1. **The cheaper model is the expensive one.** Qwen costs 25% less per run, but it fails so much more often that every *correct* answer costs 17% more. Failed runs still burn tokens and GPU time, so AgentOps-X ranks models by cost per successful run, not cost per call.
-2. **The gap is real, not noise.** 28/30 vs 18/30 gives p = 0.002 on a two-proportion test, and the dashboard says so in plain words. With fewer runs it says the opposite: "not significant yet, run more tasks."
-3. **The weakest link was not the flaky service.** The tools with injected timeouts recovered through retries. The least reliable tool turned out to be the calculator, with 21% of 214 calls failing, because of what the agents sent it rather than because it was down.
+1. **One "successful" run cost as much as a hundred normal ones.** Run `edff08d9` took 338 seconds and $0.132, against about 7 seconds and $0.001 for a typical run, and it still ended with the right answer. The trace shows why: a single LLM call ran for 330 of those 338 seconds, and the run used 19,284 tokens. That one run out of 82 is 57% of Qwen's entire cost. Just before it finished, GPU batching had brought Qwen to $0.00206 per correct answer, slightly below Gemini; afterwards it was $0.00478, more than double. A pass/fail dashboard would never flag this run, which is the case for tracing every call and for output-token limits.
+2. **The model gap is real. The prompt gap is not.** Gemini vs Qwen (93% vs 59%) is significant at p < 0.001. A rewritten prompt that looked like an obvious improvement scored 74% vs 76% for the original over 148 runs (p = 0.849). The dashboard says both in plain words, so nobody ships a "fix" that does nothing.
+3. **The weakest link was not the flaky service.** The tools with injected timeouts mostly recovered through retries. The least reliable tool turned out to be the calculator, with 21% of 214 calls failing, and the failing spans show why: the models wrote expressions like `stock_price * fx_rate` and `result_of_get_stock_price * result_of_get_fx_rate`, as if the calculator could see the results of earlier tool calls. Tools are stateless; the model has to pass the actual numbers. That's a prompt and tool-design fix, invisible without the inputs of every call.
+4. **The GPU had room to spare.** Doubling concurrent agents from 4 to 8 doubled server throughput (about 200 to 400 tokens/s) for almost no extra power, and the KV cache never passed 2%. The bottleneck was traffic, not hardware.
 
 <p align="center"><img src="docs/compare.png" alt="Model and prompt comparison with confidence intervals and cost per successful run" width="100%"></p>
+
+<p align="center"><img src="docs/runaway.png" alt="The runaway run: one LLM call takes 330 of 338 seconds" width="100%"><br><sub>The runaway run: one LLM call (the long blue bar) takes 330 of the run's 338 seconds, and the run is still marked a success.</sub></p>
 
 ## A look inside
 
 <table>
 <tr>
-<td width="50%"><img src="docs/trace.png" alt="Trace waterfall"><br><b>Trace waterfall.</b> Every node, LLM call and tool call on one timeline. Retried attempts are striped amber, failures are red, and the light part of each LLM bar is time to first token. Click any step for its inputs, outputs, error, tokens, cost and the GPU state while it ran.</td>
+<td width="50%"><img src="docs/trace.png" alt="Trace waterfall"><br><b>Trace waterfall.</b> Every node, LLM call and tool call on one timeline. Retried attempts are striped amber, failures are red, and the light part of each LLM bar is time to first token. Here two parallel price lookups time out, LangGraph retries the whole tools step twice, and the run still succeeds. The trace also shows the hidden cost: each retry re-ran every tool call in the step, including the ones that had already worked.</td>
 <td width="50%"><img src="docs/overview.png" alt="Overview"><br><b>Overview.</b> Task success with its confidence interval, p50/p95 latency, cost per successful run, why runs fail, and which tool is the weakest.</td>
 </tr>
 <tr>
