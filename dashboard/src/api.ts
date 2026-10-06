@@ -63,3 +63,15 @@ export interface GpuSample {
   power_w: number | null; temp_c: number | null; kv_cache_pct: number | null; requests_running: number | null;
   requests_waiting: number | null; gen_tokens_per_s: number | null; prompt_tokens_per_s: number | null;
 }
+
+export interface Alert {
+  id: number; created_at: string; agent_name: string; model: string | null; run_id: string | null; span_id: string | null;
+  kind: "cost_spike" | "latency_spike" | "runaway_generation" | "budget_exceeded" | string;
+  severity: "warning" | "critical"; message: string; value: number | null; baseline: number | null; acknowledged: boolean;
+}
+
+export async function post<T>(path: string): Promise<T> {
+  const res = await fetch(`api/${path}`, { method: "POST" });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} on api/${path}`);
+  return res.json();
+}

@@ -10,6 +10,10 @@ from demo.tools import TOOLS
 
 AGENT_NAME = "fin-agent"
 
+# Output cap on every LLM call: the fix for the runaway generation AgentOps-X caught
+# (one call that generated for 330 s and cost ~100x a normal run). 0 disables it.
+MAX_OUTPUT_TOKENS = int(os.environ.get("LLM_MAX_OUTPUT_TOKENS", "2048")) or None
+
 PROMPTS = {
     "v1": "You are a financial assistant. Use the tools to answer the user's question.",
     "v2": (
@@ -30,7 +34,8 @@ def make_llm(profile=None):
         return ChatOpenAI(base_url=f"http://127.0.0.1:{os.environ.get('VLLM_PORT', '8001')}/v1",
                           api_key=os.environ.get("VLLM_API_KEY", "local"),
                           model=os.environ.get("LOCAL_MODEL", "Qwen/Qwen2.5-14B-Instruct"),
-                          temperature=0.2, timeout=120, max_retries=2, streaming=True, stream_usage=True)
+                          temperature=0.2, timeout=120, max_retries=2, streaming=True, stream_usage=True,
+                          max_tokens=MAX_OUTPUT_TOKENS)
     if os.environ.get("DEMO_FAKE_LLM") == "1":
         from demo.fake_llm import FakeFinanceLLM
         return FakeFinanceLLM()
@@ -39,10 +44,11 @@ def make_llm(profile=None):
         # which the OpenAI-compatible endpoint path drops (-> HTTP 400).
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(model=os.environ["LLM_MODEL"], google_api_key=os.environ["LLM_API_KEY"],
-                                      timeout=90, max_retries=4)
+                                      timeout=90, max_retries=4, max_output_tokens=MAX_OUTPUT_TOKENS)
     from langchain_openai import ChatOpenAI  # any OpenAI-compatible server: vLLM, OpenAI, ...
     return ChatOpenAI(base_url=os.environ["LLM_BASE_URL"], api_key=os.environ["LLM_API_KEY"],
-                      model=os.environ["LLM_MODEL"], temperature=0.2, timeout=90, max_retries=4)
+                      model=os.environ["LLM_MODEL"], temperature=0.2, timeout=90, max_retries=4,
+                      max_tokens=MAX_OUTPUT_TOKENS)
 
 
 def build_graph(llm, system_prompt):

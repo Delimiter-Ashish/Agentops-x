@@ -10,6 +10,7 @@ from collections import Counter
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 
+from server.anomaly import check_run
 from server.config import settings
 from server.models import GpuSample, PromptVersion, Run, Span
 from server.schemas import RunEnd, RunStart, SpanIn
@@ -96,6 +97,7 @@ async def _run_end(session, ev: RunEnd):
         llm_calls=agg[0], tool_calls=agg[1], tool_errors=agg[2], retries=agg[3],
         prompt_tokens=agg[4], completion_tokens=agg[5], cost_usd=agg[6],
         peak_memory_mb=agg[7], max_state_bytes=agg[8]))
+    await check_run(session, ev.id)
 
 
 async def ingest_gpu(session, samples):

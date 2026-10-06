@@ -130,13 +130,14 @@ def emit(event):
 class Run:
     """One execution of an agent. Use as a context manager:
 
-        with agentops.run("fin-agent", input=q, prompt_version=("v2", PROMPT)) as run:
-            out = graph.invoke(..., config={"callbacks": [run.callback]})
+        with agentops.run("fin-agent", input=q, prompt_version=("v2", PROMPT), limits=Limits(...)) as run:
+            out = graph.invoke(..., config={"callbacks": run.callbacks})
             run.set_output(out)
             run.mark_success(check(out))
     """
 
-    def __init__(self, agent, input=None, prompt_version=None, tags=None, metadata=None):
+    def __init__(self, agent, input=None, prompt_version=None, tags=None, metadata=None, limits=None):
+        from agentops.guard import Guard
         from agentops.langgraph import AgentOpsCallback  # local import: langchain is optional for the core
 
         self.id = str(uuid.uuid4())
@@ -149,6 +150,14 @@ class Run:
         self.task_success = None
         self.failure_reason = None
         self.callback = AgentOpsCallback(self)
+        self.guard = Guard(limits) if limits else None
+        if limits:
+            self.metadata["guardrails"] = {k: v for k, v in vars(limits).items() if v is not None}
+
+    @property
+    def callbacks(self):
+        """Tracer plus guardrails: pass as config={"callbacks": run.callbacks}."""
+        return [self.callback] + ([self.guard] if self.guard else [])
 
     def __enter__(self):
         pv = None

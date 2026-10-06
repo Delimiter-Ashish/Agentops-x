@@ -58,6 +58,19 @@ What the traces made visible:
 
 <p align="center"><img src="docs/runaway.png" alt="The runaway run: one LLM call takes 330 of 338 seconds" width="100%"><br><sub>The runaway run: one LLM call (the long blue bar) takes 330 of the run's 338 seconds, and the run is still marked a success.</sub></p>
 
+## From finding to fix
+
+Finding the runaway run is half the job. AgentOps-X now closes the loop in two places:
+
+- **Alerts.** Every finished run is checked against the normal behaviour of the same agent on the same model. A run or LLM call is flagged when it is both several times the median *and* beyond a robust statistical bar (median + 8 × MAD), with absolute floors so tiny runs never page anyone. Replaying the runaway run against this history raises three critical alerts at once: a runaway generation (one call producing hundreds of times the usual output), a cost spike and a slow run, and the trace highlights the exact LLM call.
+- **Guardrails in the SDK.** `agentops.Limits` caps output tokens per LLM call and sets per-run budgets for cost, total tokens and number of LLM calls. With a streaming model the per-call cap is enforced *while the model is still generating*: the stream is cut at the limit instead of running to the end of the context window. A breach raises `BudgetExceeded`, which is traced and alerted like any other failure.
+
+```python
+limits = agentops.Limits(max_output_tokens_per_call=4096, max_cost_usd=0.05, max_llm_calls=12)
+with agentops.run("fin-agent", input=question, limits=limits) as run:
+    graph.invoke(state, config={"callbacks": run.callbacks})
+```
+
 ## A look inside
 
 <table>
@@ -114,6 +127,8 @@ These are the choices that turn a logging script into something you could run in
 - **Aggregates are computed on the server.** Tokens, cost, retries, tool errors and peak memory are rolled up from spans in the same transaction that closes the run, so the client can't report numbers that disagree with its own trace.
 - **Success rates come with honest error bars.** Every rate has a 95% Wilson interval (correct even at small sample sizes), and comparisons use a two-proportion z-test, so "v2 is better" is a measured claim.
 - **GPU cost is batching-aware.** A GPU serving four requests at once costs each of them a quarter as much. Each self-hosted LLM call is charged `latency × GPU price ÷ average concurrent requests` during that call, using the telemetry samples.
+- **Anomalies are judged against their own baseline.** A self-hosted 14B model and a hosted API have different normals, so baselines are per agent and per model. Median and MAD are used instead of mean and standard deviation, because the outliers being hunted would inflate a mean and hide themselves.
+- **Guardrails are separate from tracing.** The tracer swallows its own errors so it can never break an agent; the guard is the one component that is *supposed* to interrupt a run, so it lives in its own callback with the opposite error policy.
 - **The model server is its own service.** vLLM runs in a separate environment with its own pinned PyTorch/CUDA stack and is reached over the OpenAI-compatible API, so the platform's dependencies never fight the inference stack.
 - **Built with real models, not just mocks.** Running against Gemini 3 surfaced a real integration bug: its OpenAI-compatible endpoint drops the "thought signatures" Gemini 3 requires across tool-calling turns, so every multi-step run failed with HTTP 400. The traces showed every run dying at the same step with the same error, which pointed straight at it; the fix was to use the native Gemini client.
 
@@ -158,6 +173,7 @@ python -m demo.run models                    # hosted vs self-hosted, head to he
 | `GET /api/failures?agent=` | failure causes and tool health |
 | `GET /api/timeseries?agent=` | success rate, p95 latency and cost over time |
 | `GET /api/gpu/timeseries` | recent GPU telemetry |
+| `GET /api/alerts` | open alerts; `POST /api/alerts/{id}/ack` acknowledges, `POST /api/alerts/scan` rechecks history |
 </details>
 
 ## Repository layout
@@ -175,6 +191,7 @@ scripts/      setup, database, model server and dashboard build scripts
 - [x] SDK, collector, PostgreSQL data model, statistics API, demo agent with fault injection
 - [x] Self-hosted LLMs on GPU with vLLM, GPU-aware tracing, batching-aware GPU cost
 - [x] Dashboard: overview, run explorer, trace waterfall, model and prompt comparison, live GPU view
+- [x] Alerts for cost spikes, slow runs and runaway generations; SDK guardrails with in-flight output caps and run budgets
 - [ ] AI root-cause analyst that clusters failures and explains each cluster
 - [ ] Chaos testing: inject faults on purpose and score how reliably an agent recovers
 - [ ] Replay a failed run from any step with a changed prompt

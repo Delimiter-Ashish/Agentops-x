@@ -6,7 +6,8 @@
         result = graph.invoke(state, config={"callbacks": [run.callback]})
         run.mark_success(is_correct(result))
 """
+from agentops.guard import BudgetExceeded, Limits
 from agentops.tracer import Run, flush, init, run
 
-__all__ = ["init", "run", "flush", "Run"]
-__version__ = "0.1.0"
+__all__ = ["init", "run", "flush", "Run", "Limits", "BudgetExceeded"]
+__version__ = "0.4.0"

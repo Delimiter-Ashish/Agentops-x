@@ -19,15 +19,15 @@ from demo.agent import AGENT_NAME, PROMPTS, build_graph, make_llm  # noqa: E402
 from demo.tasks import check, make_tasks  # noqa: E402
 
 
-def run_one(graphs, version, task):
+def run_one(graphs, version, task, limits=None):
     t0 = time.time()
     status, got = "?", None
     try:
         with agentops.run(AGENT_NAME, input={"question": task["question"]},
                           prompt_version=(version, PROMPTS[version]), tags=[f"prompt:{version}"],
-                          metadata={"expected": task["expected"]}) as run:
+                          metadata={"expected": task["expected"]}, limits=limits) as run:
             result = graphs[version].invoke({"messages": [HumanMessage(task["question"])]},
-                                            config={"callbacks": [run.callback], "recursion_limit": 14})
+                                            config={"callbacks": run.callbacks, "recursion_limit": 14})
             answer = result["messages"][-1].text  # str even when content is a list of blocks (Gemini 3)
             ok, got = check(answer, task["expected"])
             run.set_output({"answer": answer, "parsed": got})
@@ -44,6 +44,7 @@ def main():
     ap.add_argument("--prompts", nargs="+", default=list(PROMPTS))
     ap.add_argument("--concurrency", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-guardrails", action="store_true", help="run without budgets (to reproduce runaways)")
     ap.add_argument("--llm", choices=["env", "local"], default="env",
                     help="env: LLM_* settings from .env (e.g. Gemini); local: self-hosted vLLM server")
     args = ap.parse_args()
@@ -51,14 +52,17 @@ def main():
     agentops.init()
     llm = make_llm(None if args.llm == "env" else args.llm)
     graphs = {v: build_graph(llm, PROMPTS[v]) for v in args.prompts}
+    limits = None if args.no_guardrails else agentops.Limits(
+        max_output_tokens_per_call=4096, max_cost_usd=0.05, max_llm_calls=12)
     tasks = make_tasks(args.runs, seed=args.seed)
     jobs = [(args.prompts[i % len(args.prompts)], t) for i, t in enumerate(tasks)]
     model = getattr(llm, "model_name", None) or getattr(llm, "model", None) or type(llm).__name__
-    print(f"{len(jobs)} runs | prompts {args.prompts} | model {model}\n")
+    print(f"{len(jobs)} runs | prompts {args.prompts} | model {model} | "
+          f"guardrails {'off' if limits is None else 'on'}\n")
 
     icons = {"success": "✓", "failure": "✗"}
     with ThreadPoolExecutor(args.concurrency) as ex:
-        for i, (v, status, secs, got, exp) in enumerate(ex.map(lambda j: run_one(graphs, *j), jobs), 1):
+        for i, (v, status, secs, got, exp) in enumerate(ex.map(lambda j: run_one(graphs, *j, limits=limits), jobs), 1):
             print(f"[{i:3d}/{len(jobs)}] {icons.get(status, '!')} {v}  {secs:5.1f}s  {status:<26} got={got} expected={exp}")
 
     agentops.flush()

@@ -118,3 +118,23 @@ class GpuSample(Base):
     requests_waiting: Mapped[float | None] = mapped_column(Float)
     gen_tokens_per_s: Mapped[float | None] = mapped_column(Float)
     prompt_tokens_per_s: Mapped[float | None] = mapped_column(Float)
+
+
+class Alert(Base):
+    """Something an operator should look at: a cost or latency spike, a runaway generation, a budget breach."""
+    __tablename__ = "alerts"
+    __table_args__ = (Index("ix_alerts_agent_created", "agent_name", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dedup_key: Mapped[str] = mapped_column(String(300), unique=True)   # kind:run:span, so rescans never duplicate
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    agent_name: Mapped[str] = mapped_column(String(200))
+    model: Mapped[str | None] = mapped_column(String(200))
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    span_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    kind: Mapped[str] = mapped_column(String(40))          # cost_spike | latency_spike | runaway_generation | budget_exceeded
+    severity: Mapped[str] = mapped_column(String(16))      # warning | critical
+    message: Mapped[str] = mapped_column(Text)
+    value: Mapped[float | None] = mapped_column(Float)
+    baseline: Mapped[float | None] = mapped_column(Float)
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")

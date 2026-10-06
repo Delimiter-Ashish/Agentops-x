@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { get, type RunDetail, type Span } from "../api";
+import { get, type Alert, type RunDetail, type Span } from "../api";
+import { KIND_LABEL } from "./Alerts";
 import { useData } from "../useData";
 import { Failed, Loading, StatusDot } from "../components/bits";
 import { datetime, num, secs, short, usd } from "../format";
@@ -32,14 +33,16 @@ function layout(spans: Span[]): { rows: Row[]; t0: number; total: number } {
 const json = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
 
 export default function RunView({ id }: { id: string }) {
-  const { data, error } = useData(() => get<{ run: RunDetail; spans: Span[] }>(`runs/${id}`), [id]);
+  const { data, error } = useData(() => get<{ run: RunDetail; spans: Span[]; alerts: Alert[] }>(`runs/${id}`), [id]);
   const [sel, setSel] = useState<string | null>(null);
   const lay = useMemo(() => (data?.spans.length ? layout(data.spans) : null), [data]);
 
   if (error) return <Failed error={error} />;
   if (!data) return <Loading />;
-  const { run, spans } = data;
-  const selected = spans.find((s) => s.id === sel) ?? spans.find((s) => s.status === "error" && s.kind !== "graph") ?? spans[0];
+  const { run, spans, alerts } = data;
+  const flagged = alerts.find((a) => a.span_id)?.span_id;
+  const selected = spans.find((s) => s.id === sel) ?? spans.find((s) => s.id === flagged)
+    ?? spans.find((s) => s.status === "error" && s.kind !== "graph") ?? spans[0];
 
   return (
     <>
@@ -55,6 +58,9 @@ export default function RunView({ id }: { id: string }) {
         <span>Retries <b>{run.retries}</b></span>
         <span>Peak memory <b>{run.peak_memory_mb ? `${num(run.peak_memory_mb)} MB` : "–"}</b></span>
       </div>
+      {alerts.map((a) => (
+        <p key={a.id} className={`alert-box ${a.severity}`}><b>{KIND_LABEL[a.kind] ?? a.kind}.</b> {a.message}</p>
+      ))}
       {run.failure_reason && <p className="callout">{run.failure_reason}</p>}
 
       {!lay ? <div className="empty section">This run has no spans.</div> : (
@@ -64,6 +70,7 @@ export default function RunView({ id }: { id: string }) {
               <div className="wf-head"><span>Step</span><span>0 to {secs(lay.total)}</span><span style={{ textAlign: "right" }}>Time</span></div>
               {lay.rows.map(({ span: s, depth, start, end }) => {
                 const retry = s.kind === "node" && s.attempt > 1;
+                const hot = alerts.some((a) => a.span_id === s.id);
                 const cls = s.status === "error" ? "bad" : retry ? "retry" : s.kind;
                 const ttft = s.kind === "llm" && s.ttft_ms && s.latency_ms ? (s.ttft_ms / s.latency_ms) * 100 : null;
                 return (
@@ -74,6 +81,7 @@ export default function RunView({ id }: { id: string }) {
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
                       {retry && <span className="tag warn">try {s.attempt}</span>}
                       {s.status === "error" && <span className="tag err">{s.error?.type ?? "error"}</span>}
+                      {hot && <span className="tag err">anomaly</span>}
                     </div>
                     <div className="wf-lane">
                       <div className={`wf-bar ${cls}`} style={{ left: `${(start / lay.total) * 100}%`, width: `${Math.max(0.3, ((end - start) / lay.total) * 100)}%` }}>

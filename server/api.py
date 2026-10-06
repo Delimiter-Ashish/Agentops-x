@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, literal_column, select
 
 from server.db import get_session
-from server.models import GpuSample, PromptVersion, Run, Span
+from server.anomaly import scan
+from server.models import Alert, GpuSample, PromptVersion, Run, Span
 
 router = APIRouter(prefix="/api")
 
@@ -115,7 +116,8 @@ async def get_run(run_id: uuid.UUID, session=Depends(get_session)):
         if sp["kind"] == "llm":
             sp["tokens_per_s"] = tokens_per_s(sp)
             sp["gpu"] = gpu_context(sp, samples) if samples else None
-    return {"run": run_dict(run, detail=True), "spans": spans}
+    alerts = (await session.execute(select(Alert).where(Alert.run_id == run_id).order_by(Alert.created_at))).scalars().all()
+    return {"run": run_dict(run, detail=True), "spans": spans, "alerts": [alert_dict(a) for a in alerts]}
 
 
 @router.get("/prompt-versions")
@@ -242,3 +244,38 @@ async def summary(agent: str, hours: int = Query(24 * 30, le=24 * 365), session=
             "success_ci95": [lo, hi], "p50_latency_ms": p50, "p95_latency_ms": p95, "avg_cost_usd": cost,
             "total_cost_usd": total_cost, "cost_per_success_usd": (total_cost / ok) if total_cost and ok else None,
             "retries": retries, "tool_errors": tool_err, "tokens": tokens}
+
+
+ALERT_FIELDS = ("id", "created_at", "agent_name", "model", "run_id", "span_id", "kind", "severity", "message",
+                "value", "baseline", "acknowledged")
+
+
+def alert_dict(a):
+    return {f: getattr(a, f) for f in ALERT_FIELDS}
+
+
+@router.get("/alerts")
+async def alerts(agent: str | None = None, include_acknowledged: bool = False, limit: int = Query(200, le=1000),
+                 session=Depends(get_session)):
+    q = select(Alert).order_by(Alert.created_at.desc()).limit(limit)
+    if agent:
+        q = q.where(Alert.agent_name == agent)
+    if not include_acknowledged:
+        q = q.where(Alert.acknowledged.is_(False))
+    return [alert_dict(a) for a in (await session.execute(q)).scalars().all()]
+
+
+@router.post("/alerts/{alert_id}/ack")
+async def ack_alert(alert_id: int, session=Depends(get_session)):
+    a = (await session.execute(select(Alert).where(Alert.id == alert_id))).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(404, "alert not found")
+    a.acknowledged = True
+    await session.commit()
+    return alert_dict(a)
+
+
+@router.post("/alerts/scan")
+async def scan_alerts(agent: str | None = None, session=Depends(get_session)):
+    """Re-check all finished runs against current baselines (backfills alerts for older data)."""
+    return {"runs_checked": await scan(session, agent)}
